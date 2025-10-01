@@ -146,6 +146,8 @@ if __name__ == "__main__":
     argparser.add_argument('--wandb', action='store_true', help='Start a wandb session and write the results of training.  Only applies to training.  Use --wandb_name instead to specify a name', default=False)
     argparser.add_argument('--wandb_name', default=None, help='Name of a wandb session to start when training.  Will default to the dataset short name')
 
+    argparser.add_argument("--logging", choices=("tensorboard", "wandb"), default="tensorboard", help="Which logger to use.")
+
     args = argparser.parse_args()
 
     if args.warm_start and args.weights is not None:
@@ -198,7 +200,7 @@ if __name__ == "__main__":
 
     # if wandb, generate wandb configuration 
     if args.mode == "train":
-        if args.wandb:
+        if args.logging == "wandb":
             import wandb
             wandb_name = args.wandb_name if args.wandb_name else f"wl_coref_{args.experiment}"
             wandb.init(name=wandb_name, config=dataclasses.asdict(config), project="stanza")
@@ -208,10 +210,11 @@ if __name__ == "__main__":
 
         model = CorefModel(config=config)
         if args.weights is not None or args.warm_start:
+            logger.info(f"Loading model weights from {args.weights}...")
             model.load_weights(path=args.weights, map_location="cpu",
                                noexception=args.warm_start)
         with output_running_time():
-            model.train(args.wandb)
+            model.train(args.logging)
     else:
         config_update = {
             'log_norms': args.log_norms if args.log_norms is not None else False

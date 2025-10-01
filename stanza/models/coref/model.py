@@ -429,7 +429,7 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
         logger.info("\n".join(lines))
 
 
-    def train(self, log=False):
+    def train(self, log="tensorboard"):
         """
         Trains all the trainable blocks in the model using the config provided.
 
@@ -437,11 +437,17 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
         skip_lang: str if we want to skip training this language (used for ablation)
         """
 
-        if log:
+        if log == "wandb":
             import wandb
             wandb.watch((self.bert, self.pw,
                          self.a_scorer, self.we,
                          self.rough_scorer, self.sp))
+        elif log == "tensorboard":
+            from torch.utils.tensorboard import SummaryWriter
+            writer = SummaryWriter(log_dir=f"runs/{self.config.save_name}/{datetime.now().strftime('%Y-%m-%d-%H-%M-%S-%f')}")
+        else:
+            raise NotImplementedError(f"Unknown logger {log}! Please use either 'tensorboard' or 'wandb'.")
+
 
         docs = self._get_docs(self.config.train_data)
         docs_ids = list(range(len(docs)))
@@ -485,8 +491,13 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
 
                 # log every 100 docs
                 if log and doc_indx % 100 == 0:
-                    wandb.log({'train_c_loss': c_loss.item(),
-                               'train_s_loss': s_loss.item()})
+                    if log == "wandb":
+                        wandb.log({'train_c_loss': c_loss.item(),
+                                'train_s_loss': s_loss.item()})
+                    elif log == "tensorboard":
+                        global_step = doc_indx + (len(docs_ids) * epoch)
+                        writer.add_scalar("train_c_loss", c_loss.item(), global_step=global_step)
+                        writer.add_scalar("train_s_loss", s_loss.item(), global_step=global_step)
 
 
                 del c_loss, s_loss
@@ -506,9 +517,12 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
             self.epochs_trained += 1
             scores = self.evaluate()
             prev_best_f1 = best_f1
-            if log:
+            if log == "wandb":
                 wandb.log({'dev_score': scores[1]})
                 wandb.log({'dev_bakeoff': scores[-1]})
+            elif log == "tensorboard":
+                writer.add_scalar("dev_score", scores[1], global_step=self.epochs_trained)
+                writer.add_scalar("dev_bakeoff", scores[-1], global_step=self.epochs_trained)
 
             if best_f1 is None or scores[1] > best_f1:
 
@@ -538,7 +552,12 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
                 logger.info("Epoch %d finished.\nSentence F1 %.5f p %.5f r %.5f\nBest F1 %.5f\nPrevious best F1 %.5f", self.epochs_trained, scores[1], scores[2], scores[3], best_f1, prev_best_f1)
             else:
                 logger.info("Epoch %d finished.\nSentence F1 %.5f p %.5f r %.5f\nBest F1 %.5f", self.epochs_trained, scores[1], scores[2], scores[3], best_f1)
-
+        if log == "tensorboard":
+            writer.add_hparams(
+                {"lr": self.config.learning_rate, "bert_lr": self.config.bert_learning_rate},
+                {"hparam/f1": best_f1}
+            )
+            writer.close()
     # ========================================================= Private methods
 
     def _bertify(self, doc: Doc) -> torch.Tensor:
