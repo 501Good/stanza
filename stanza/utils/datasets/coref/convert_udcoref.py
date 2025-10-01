@@ -49,6 +49,17 @@ def process_documents(docs, augment=False):
             for y in x:
                 cased_words.append(y)
 
+        mwts = {}
+        word_total = 0
+        for sent in doc.sentences:
+            for token in sent.tokens:
+                if len(token.id) > 1:
+                    mwts[token.id[0] - 1 + word_total] = {"text": token.text, "len": token.id[-1] - token.id[0] + 1}
+                    # mwts.append({"ids": [idx - 1 + word_total for idx in token.id], "text": token.text})
+            word_total += len(sent.words)
+
+        sent_id_names = [sent.sent_id for sent in doc.sentences]
+
         sent_id = [y for idx, sent_len in enumerate(sentence_lens) for y in [idx] * sent_len]
 
         word_total = 0
@@ -147,7 +158,9 @@ def process_documents(docs, augment=False):
         processed = {
             "document_id": doc_id,
             "cased_words": cased_words,
+            "mwts": mwts,
             "sent_id": sent_id,
+            "sent_id_name": sent_id_names,
             "part_id": idx,
             # "pos": pos,
             "deprel": deprel,

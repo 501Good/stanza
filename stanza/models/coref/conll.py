@@ -21,10 +21,14 @@ def write_conll(doc: Doc,
     # the nth token needs to be a number
     placeholder[9] = "0"
     placeholder = "".join(placeholder)
-    doc_id = doc["document_id"].replace("-", "_").replace("/", "_").replace(".","_")
+    doc_id = doc["document_id"]
     words = doc["cased_words"]
     part_id = doc["part_id"]
     sents = doc["sent_id"]
+    mwts = doc["mwts"]
+    head = doc["head"]
+    deprel = doc["deprel"]
+    sent_id_name = doc["sent_id_name"]
 
     max_word_len = max(len(w) for w in words)
 
@@ -44,8 +48,9 @@ def write_conll(doc: Doc,
                 starts[start].append((cluster_part, cluster_id))
                 ends[end - 1].append((cluster_part, cluster_id))
 
-    f_obj.write(f"# newdoc id = {doc_id}\n# global.Entity = eid-head\n")
+    f_obj.write(f"# newdoc id = {doc_id}\n# global.Entity = eid-head")
 
+    total_words = 0
     word_number = 0
     sent_id = 0
     for word_id, word in enumerate(words):
@@ -53,12 +58,12 @@ def write_conll(doc: Doc,
         cluster_info_lst = []
         for part, cluster_marker in starts[word_id]:
             start, end = clusters[cluster_marker][part]
-            cluster_info_lst.append(f"(e{cluster_marker}-{min(heads[cluster_marker][part], end-start)}")
+            cluster_info_lst.append(f"(e{part_id}.{cluster_marker}-{min(heads[cluster_marker][part], end-start)}")
         for part, cluster_marker in single_word[word_id]:
             start, end = clusters[cluster_marker][part]
-            cluster_info_lst.append(f"(e{cluster_marker}-{min(heads[cluster_marker][part], end-start)})")
+            cluster_info_lst.append(f"(e{part_id}.{cluster_marker}-{min(heads[cluster_marker][part], end-start)})")
         for part, cluster_marker in ends[word_id]:
-            cluster_info_lst.append(f"e{cluster_marker})")
+            cluster_info_lst.append(f"e{part_id}.{cluster_marker})")
 
 
         # we need our clusters to be ordered such that the one that is closest the first change
@@ -75,14 +80,23 @@ def write_conll(doc: Doc,
         cluster_info = "".join(cluster_info_lst) if cluster_info_lst else "_"
 
         if word_id == 0 or sents[word_id] != sents[word_id - 1]:
-            f_obj.write(f"# sent_id = {doc_id}-{sent_id}\n")
-            word_number = 0
+            # f_obj.write(f"\n# sent_id = {doc_id}.{sent_id}\n")
+            f_obj.write(f"\n# sent_id = {sent_id_name[sent_id]}\n")
+            total_words += word_number - 1 if word_id > 0 else 0
+            word_number = 1
             sent_id += 1
+
+        if str(word_id) in mwts:
+            mwt = mwts[str(word_id)]
+            mwt_id = f"{word_number}-{word_number + mwt['len'] - 1}"
+            f_obj.write(f"{mwt_id}\t{mwt["text"]}\t{'\t'.join(["_"] * 8)}\n")
 
         if cluster_info != "_":
             cluster_info = f"Entity={cluster_info}"
 
-        f_obj.write(f"{word_id}\t{word}{placeholder}\t{cluster_info}\n")
+        head_id = 0 if head[word_id] == "null" else head[word_id] - total_words + 1
+
+        f_obj.write(f"{word_number}\t{word}\t_\t_\t_\t_\t{head_id}\t{deprel[word_id]}\t_\t{cluster_info}\n")
 
         word_number += 1
 
