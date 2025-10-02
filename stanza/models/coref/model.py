@@ -589,7 +589,7 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
                             attention_mask, device=self.config.device))
             else:
                 out = self.bert(
-                        subwords_batches_tensor,
+                        input_ids=subwords_batches_tensor,
                         attention_mask=torch.tensor(
                             attention_mask, device=self.config.device))
 
