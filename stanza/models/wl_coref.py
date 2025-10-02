@@ -176,9 +176,9 @@ if __name__ == "__main__":
     if args.save_dir is not None:
         config.save_dir = args.save_dir
     if args.save_name:
-        config.save_name = args.save_name
+        config.save_name = args.save_name + f"_{args.seed}"
     else:
-        config.save_name = args.experiment
+        config.save_name = args.experiment + f"_{args.seed}"
 
     if args.rough_k is not None:
         config.rough_k = args.rough_k
