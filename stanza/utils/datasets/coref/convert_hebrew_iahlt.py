@@ -1,5 +1,4 @@
-"""
-Convert the coref annotation of IAHLT to the Stanza coref format
+"""Convert the coref annotation of IAHLT to the Stanza coref format
 
 This dataset is available at
 
@@ -16,10 +15,13 @@ Then run
 
 python3 stanza/utils/datasets/coref/convert_hebrew_iahlt.py
 
-TODO: the scores from this model are horrible, only 30 F1.
-Need to either verify the usage elsewhere or double check the outputs of the conversion
+The scores for models built from the dataset are pretty lousy in
+general, but seem to be in line with the scores obtained by other
+people working on this data.  For example, the authors said they had a
+52 F1, whereas if we use roberta-xlm, we get 50.
 """
 
+import argparse
 from collections import defaultdict, namedtuple
 import json
 import os
@@ -140,8 +142,15 @@ def write_json_file(output_filename, dataset):
     with open(output_filename, "w", encoding="utf-8") as fout:
         json.dump(dataset, fout, indent=2, ensure_ascii=False)
 
-def main():
+def main(args=None):
     paths = get_default_paths()
+    parser = argparse.ArgumentParser(
+        prog='Convert Hebrew IAHLT data',
+    )
+    parser.add_argument('--output_directory', default=None, type=str, help='Where to output the data (defaults to %s)' % paths['COREF_DATA_DIR'])
+    args = parser.parse_args(args=args)
+    coref_output_path = args.output_directory if args.output_directory else paths['COREF_DATA_DIR']
+    print("Will write IAHLT dataset to %s" % coref_output_path)
 
     coref_input_path = paths["COREF_BASE"]
     hebrew_base_path = os.path.join(coref_input_path, "hebrew", "coref", "train_val_test")
@@ -155,10 +164,12 @@ def main():
         input_filename = os.path.join(hebrew_base_path, input_filename)
         assert os.path.exists(input_filename)
         docs = read_doc(tokenizer, input_filename)
-        dataset = [process_document(pipe, doc.doc_id, "", doc.sentences, doc.coref_spans, None) for doc in tqdm(docs)]
+        dataset = [process_document(pipe, doc.doc_id, "", doc.sentences, doc.coref_spans, None, lang="he") for doc in tqdm(docs)]
 
-        output_filename = os.path.join(paths["COREF_DATA_DIR"], output_filename)
+        output_filename = os.path.join(coref_output_path, output_filename)
         write_json_file(output_filename, dataset)
+
+    return output_files
 
 if __name__ == '__main__':
     main()

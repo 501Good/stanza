@@ -33,6 +33,7 @@ from stanza.models.coref.pairwise_encoder import PairwiseEncoder
 from stanza.models.coref.rough_scorer import RoughScorer
 from stanza.models.coref.span_predictor import SpanPredictor
 from stanza.models.coref.utils import GraphNode
+from stanza.models.coref.utils import sigmoid_focal_loss
 from stanza.models.coref.word_encoder import WordEncoder
 from stanza.models.coref.dataset import CorefDataset
 from stanza.models.coref.tokenizer_customization import *
@@ -40,6 +41,8 @@ from stanza.models.coref.tokenizer_customization import *
 from stanza.models.common.bert_embedding import load_tokenizer
 from stanza.models.common.foundation_cache import load_bert, load_bert_with_peft, NoTransformerFoundationCache
 from stanza.models.common.peft_config import build_peft_wrapper, load_peft_wrapper
+
+import torch.nn as nn
 
 logger = logging.getLogger('stanza')
 
@@ -140,6 +143,8 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
         running_loss = 0.0
         s_correct = 0
         s_total = 0
+        z_correct = 0
+        z_total = 0
 
         with conll.open_(self.config, self.epochs_trained, data_split) \
                 as (gold_f, pred_f):
@@ -150,13 +155,25 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
                     # want to test evaluation on one language
                     continue
  
-                res = self.run(doc)
+                res = self.run(doc, True)
+                # measure zero prediction accuracy
+                zero_preds = (res.zero_scores > 0).view(-1).to(device=res.zero_scores.device)
+                is_zero = doc.get("is_zero")
+                if is_zero is None:
+                    zero_targets = torch.zeros_like(zero_preds, device=zero_preds.device)
+                else:
+                    zero_targets = torch.tensor(is_zero, device=zero_preds.device)
+                z_correct += (zero_preds == zero_targets).sum().item()
+                z_total += zero_targets.numel()
 
                 if (res.coref_y.argmax(dim=1) == 1).all():
                     logger.warning(f"EVAL: skipping document with no corefs...")
                     continue
 
                 running_loss += self._coref_criterion(res.coref_scores, res.coref_y).item()
+                if res.word_clusters is None or res.span_clusters is None:
+                    logger.warning(f"EVAL: skipping document with no clusters...")
+                    continue
 
                 if res.span_y:
                     pred_starts = res.span_scores[:, :, 0].argmax(dim=1)
@@ -191,8 +208,10 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
                     f" f1: {s_lea[0]:.5f},"
                     f" p: {s_lea[1]:.5f},"
                     f" r: {s_lea[2]:<.5f}"
+                    f" | ZA: {z_correct / z_total:<.5f}"
                 )
             logger.info(f"CoNLL-2012 3-Score Average : {w_checker.bakeoff:.5f}")
+            logger.info(f"Zero prediction accuracy: {z_correct / z_total:.5f}")
 
         return (running_loss / len(docs), *s_checker.total_lea, *w_checker.total_lea, *s_checker.mbc, *w_checker.mbc, w_checker.bakeoff, s_checker.bakeoff)
 
@@ -332,6 +351,7 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
 
     def run(self,  # pylint: disable=too-many-locals
             doc: Doc,
+            use_gold_spans_for_zeros = False
             ) -> CorefResult:
         """
         This is a massive method, but it made sense to me to not split it into
@@ -380,15 +400,26 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
         res.coref_y = self._get_ground_truth(
             cluster_ids, top_indices, (top_rough_scores > float("-inf")),
             self.config.clusters_starts_are_singletons,
-            self.config.singletons)
+            self.config.singletons
+        )
 
-        res.word_clusters = self._clusterize(doc, res.coref_scores, top_indices,
-                                             self.config.singletons)
+        res.word_clusters = self._clusterize(
+            doc, res.coref_scores, top_indices,
+            self.config.singletons
+        )
 
         res.span_scores, res.span_y = self.sp.get_training_data(doc, words)
 
         if not self.training:
             res.span_clusters = self.sp.predict(doc, words, res.word_clusters)
+
+        if not self.training and not use_gold_spans_for_zeros:
+            zero_words = words[[word_id
+                                for cluster in res.word_clusters
+                                for word_id in cluster]]
+        else:
+            zero_words = words[[i[0] for i in sorted(doc["head2span"])]]
+        res.zero_scores = self.zeros_predictor(zero_words)
 
         return res
 
@@ -453,6 +484,27 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
         docs_ids = list(range(len(docs)))
         avg_spans = docs.avg_span
 
+        # for a brand new model, we set the zeros prediction to all 0 if the dataset has no zeros
+        training_has_zeros = any('is_zero' in doc for doc in docs)
+        if not training_has_zeros:
+            logger.info("No zeros found in the dataset.  The zeros predictor will set to 0")
+            if self.epochs_trained == 0:
+                # new model, set it to always predict not-zero
+                self.disable_zeros_predictor()
+
+        attenuated_languages = set()
+        if self.config.lang_lr_attenuation:
+            attenuated_languages = self.config.lang_lr_attenuation.split(",")
+            logger.info("Attenuating LR for the following languages: %s", attenuated_languages)
+
+        lr_scaled_languages = dict()
+        if self.config.lang_lr_weights:
+            scaled_languages = self.config.lang_lr_weights.split(",")
+            for piece in scaled_languages:
+                pieces = piece.split("=")
+                lr_scaled_languages[pieces[0]] = float(pieces[1])
+            logger.info("Scaling LR for the following languages: %s", lr_scaled_languages)
+
         best_f1 = None
         for epoch in range(self.epochs_trained, self.config.train_epochs):
             self.training = True
@@ -460,6 +512,7 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
                 self.log_norms()
             running_c_loss = 0.0
             running_s_loss = 0.0
+            running_z_loss = 0.0
             random.shuffle(docs_ids)
             pbar = tqdm(docs_ids, unit="docs", ncols=0)
             for doc_indx, doc_id in enumerate(pbar):
@@ -474,6 +527,16 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
 
                 res = self.run(doc)
 
+                if res.zero_scores.size(0) == 0 or not training_has_zeros:
+                    z_loss = 0.0 # since there are no corefs
+                else:
+                    is_zero = doc.get("is_zero")
+                    if is_zero is None:
+                        is_zero = torch.zeros_like(res.zero_scores.squeeze(-1), device=res.zero_scores.device, dtype=torch.float)
+                    else:
+                        is_zero = torch.tensor(is_zero).to(res.zero_scores.device).float()
+                    z_loss = sigmoid_focal_loss(res.zero_scores.squeeze(-1), is_zero, reduction="mean")
+
                 c_loss = self._coref_criterion(res.coref_scores, res.coref_y)
 
                 if res.span_y:
@@ -482,25 +545,36 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
                 else:
                     s_loss = torch.zeros_like(c_loss)
 
-                del res
+                lr_scale = lr_scaled_languages.get(doc.get("lang"), 1.0)
+                if doc.get("lang") in attenuated_languages:
+                    lr_scale = lr_scale / max(epoch, 1.0)
+                c_loss = c_loss * lr_scale
+                s_loss = s_loss * lr_scale
+                z_loss = z_loss * lr_scale
 
-                (c_loss + s_loss).backward()
+                (c_loss + s_loss + z_loss).backward()
 
                 running_c_loss += c_loss.item()
                 running_s_loss += s_loss.item()
+                if res.zero_scores.size(0) != 0 and training_has_zeros:
+                    running_z_loss += z_loss.item()
 
                 # log every 100 docs
                 if log and doc_indx % 100 == 0:
+                    logged = {
+                        'train_c_loss': c_loss.item(),
+                        'train_s_loss': s_loss.item(),
+                    }
+                    if res.zero_scores.size(0) != 0 and training_has_zeros:
+                        logged['train_z_loss'] = z_loss.item()
                     if log == "wandb":
-                        wandb.log({'train_c_loss': c_loss.item(),
-                                'train_s_loss': s_loss.item()})
+                        wandb.log(logged)
                     elif log == "tensorboard":
                         global_step = doc_indx + (len(docs_ids) * epoch)
-                        writer.add_scalar("train_c_loss", c_loss.item(), global_step=global_step)
-                        writer.add_scalar("train_s_loss", s_loss.item(), global_step=global_step)
+                        for key, value in logged.items():
+                            writer.add_scalar(key, value, global_step=global_step)
 
-
-                del c_loss, s_loss
+                del c_loss, s_loss, z_loss, res
 
                 for optim in self.optimizers.values():
                     optim.step()
@@ -512,6 +586,7 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
                     f" {doc['document_id']:26}"
                     f" c_loss: {running_c_loss / (pbar.n + 1):<.5f}"
                     f" s_loss: {running_s_loss / (pbar.n + 1):<.5f}"
+                    f" z_loss: {running_z_loss / (pbar.n + 1):<.5f}"
                 )
 
             self.epochs_trained += 1
@@ -633,13 +708,24 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
         self.we = WordEncoder(bert_emb, self.config).to(self.config.device)
         self.rough_scorer = RoughScorer(bert_emb, self.config).to(self.config.device)
         self.sp = SpanPredictor(bert_emb, self.config.sp_embedding_size).to(self.config.device)
+        self.zeros_predictor = nn.Sequential(
+            nn.Linear(bert_emb, bert_emb),
+            nn.ReLU(),
+            nn.Linear(bert_emb, 1)
+        ).to(self.config.device)
+        if not hasattr(self.config, 'use_zeros') or not self.config.use_zeros:
+            self.disable_zeros_predictor()
 
         self.trainable: Dict[str, torch.nn.Module] = {
             "bert": self.bert, "we": self.we,
             "rough_scorer": self.rough_scorer,
             "pw": self.pw, "a_scorer": self.a_scorer,
-            "sp": self.sp
+            "sp": self.sp, "zeros_predictor": self.zeros_predictor
         }
+
+    def disable_zeros_predictor(self):
+        nn.init.zeros_(self.zeros_predictor[-1].weight)
+        nn.init.zeros_(self.zeros_predictor[-1].bias)
 
     def _build_optimizers(self):
         n_docs = len(self._get_docs(self.config.train_data))
@@ -804,4 +890,3 @@ class CorefModel:  # pylint: disable=too-many-instance-attributes
         self._training = value
         for module in self.trainable.values():
             module.train(self._training)
-

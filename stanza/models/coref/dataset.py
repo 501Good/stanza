@@ -50,9 +50,11 @@ class CorefDataset(Dataset):
                 word2subword.append((len(subwords), len(subwords) + len(tokenized_word)))
                 subwords.extend(tokenized_word)
                 word_id.extend([i] * len(tokenized_word))
+
             doc["word2subword"] = word2subword
             doc["subwords"] = subwords
             doc["word_id"] = word_id
+
             self.__out.append(doc)
         logger.info("Loaded %d docs from %s.", len(data_f), path)
 
