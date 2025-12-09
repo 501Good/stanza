@@ -123,6 +123,8 @@ if __name__ == "__main__":
                            help="If set, update the learning rate for the model")
     argparser.add_argument("--bert_learning_rate", default=None, type=float,
                            help="If set, update the learning rate for the transformer")
+    argparser.add_argument("--conll_log_dir", default=None,
+                           help="If set, update the save directory for writing output conll logs")
     argparser.add_argument("--save_dir", default=None,
                            help="If set, update the save directory for writing models")
     argparser.add_argument("--save_name", default=None,
@@ -173,6 +175,8 @@ if __name__ == "__main__":
     if args.dummy_mix is not None:
         config.dummy_mix = args.dummy_mix
 
+    if args.conll_log_dir is not None:
+        config.conll_log_dir = args.conll_log_dir
     if args.save_dir is not None:
         config.save_dir = args.save_dir
     if args.save_name:
