@@ -1,5 +1,5 @@
-""" Contains functions to produce conll-formatted output files with
-predicted spans and their clustering """
+"""Contains functions to produce conll-formatted output files with
+predicted spans and their clustering"""
 
 from collections import defaultdict
 from contextlib import contextmanager
@@ -11,12 +11,9 @@ from stanza.models.coref.const import Doc, Span
 
 
 # pylint: disable=too-many-locals
-def write_conll(doc: Doc,
-                clusters: List[List[Span]],
-                heads: List[int],
-                f_obj: TextIO):
-    """ Writes span/cluster information to f_obj, which is assumed to be a file
-    object open for writing """
+def write_conll(doc: Doc, clusters: List[List[Span]], heads: List[int], f_obj: TextIO):
+    """Writes span/cluster information to f_obj, which is assumed to be a file
+    object open for writing"""
     placeholder = list("\t_" * 7)
     # the nth token needs to be a number
     placeholder[9] = "0"
@@ -54,14 +51,15 @@ def write_conll(doc: Doc,
     word_number = 0
     sent_id = 0
     for word_id, word in enumerate(words):
-
         cluster_info_lst = []
         for part, cluster_marker in starts[word_id]:
             start, end = clusters[cluster_marker][part]
-            cluster_info_lst.append(f"(e{part_id}.{cluster_marker}-{min(heads[cluster_marker][part], end-start)}")
+            mention_head = min(heads[cluster_marker][part] - start + 1, end - start)
+            cluster_info_lst.append(f"(e{part_id}.{cluster_marker}-{mention_head}")
         for part, cluster_marker in single_word[word_id]:
             start, end = clusters[cluster_marker][part]
-            cluster_info_lst.append(f"(e{part_id}.{cluster_marker}-{min(heads[cluster_marker][part], end-start)})")
+            mention_head = min(heads[cluster_marker][part] - start + 1, end - start)
+            cluster_info_lst.append(f"(e{part_id}.{cluster_marker}-{mention_head})")
         for part, cluster_marker in ends[word_id]:
             cluster_info_lst.append(f"e{part_id}.{cluster_marker})")
 
@@ -70,9 +68,9 @@ def write_conll(doc: Doc,
         # is listed last in the chains
         def compare_sort(x):
             split = x.split("-")
-            if len(split) > 1: 
-                return int(split[-1].replace(")", "").strip())  
-            else: 
+            if len(split) > 1:
+                return int(split[-1].replace(")", "").strip())
+            else:
                 # we want everything that's a closer to be first
                 return float("inf")
 
@@ -89,7 +87,7 @@ def write_conll(doc: Doc,
         if str(word_id) in mwts:
             mwt = mwts[str(word_id)]
             mwt_id = f"{word_number}-{word_number + mwt['len'] - 1}"
-            f_obj.write(f"{mwt_id}\t{mwt["text"]}\t{'\t'.join(["_"] * 8)}\n")
+            f_obj.write(f"{mwt_id}\t{mwt['text']}\t{'\t'.join(['_'] * 8)}\n")
 
         if cluster_info != "_":
             cluster_info = f"Entity={cluster_info}"
@@ -105,15 +103,23 @@ def write_conll(doc: Doc,
 
 @contextmanager
 def open_(config: Config, epochs: int, data_split: str):
-    """ Opens conll log files for writing in a safe way. """
+    """Opens conll log files for writing in a safe way."""
     base_filename = f"{config.section}_{data_split}_e{epochs}"
     conll_dir = config.conll_log_dir
     kwargs = {"mode": "w", "encoding": "utf8"}
 
     os.makedirs(conll_dir, exist_ok=True)
 
-    with open(os.path.join(  # type: ignore
-            conll_dir, f"{base_filename}.gold.conll"), **kwargs) as gold_f:
-        with open(os.path.join(  # type: ignore
-                conll_dir, f"{base_filename}.pred.conll"), **kwargs) as pred_f:
+    with open(
+        os.path.join(  # type: ignore
+            conll_dir, f"{base_filename}.gold.conll"
+        ),
+        **kwargs,
+    ) as gold_f:
+        with open(
+            os.path.join(  # type: ignore
+                conll_dir, f"{base_filename}.pred.conll"
+            ),
+            **kwargs,
+        ) as pred_f:
             yield (gold_f, pred_f)
